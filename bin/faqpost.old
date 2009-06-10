@@ -1,0 +1,378 @@
+#!/usr/local/bin/perl
+my $version = "0.6b";
+
+=head1 NAME
+
+faqpost - a simple FAQ posting program.
+
+=head1 SYNOPSIS
+
+faqpost [-hvtq] [-e B<expiretime>] [-r F<rcfile>] [-n NNTPSERVER] F<filename>
+
+=cut 
+
+use News::Article;
+use vars qw($opt_h $opt_v $opt_t $opt_V $opt_e $opt_r $opt_n $nntpuser 
+            $nntppass );
+use strict;
+
+#### User Variables ####################################################
+# None of these have to be defined here; if you don't want them, comment
+# them out.  They don't hurt, though.  
+
+# A standard verimodrc file.  Note, you don't have to have one of these to
+# function properly; if you do have one, though, you can tell it what
+# groups to sign with PGPMoose, which is a nice thing.  Uncomment it if
+# you want to use it.
+# The format for doing that, in case you want to use it:
+# pgp [group] [key] "[password]"
+# pgp humanities.philosophy.objectivism 0xB90107D9 "Like I'd tell you."
+
+my $Config = "$ENV{'HOME'}/.verimodrc";		
+
+# The contents of the Approved header, if one has to be added.
+my $Approved = "tskirvin\@killfile.org";
+
+# The amount of time before expiring - weeks:days:hours:minutes:seconds
+my $ExpireTime = "6:0:0:0";
+
+# The places to post the FAQ
+my @Servers = qw( news.ks.uiuc.edu );
+# my @Servers = "news.ks.uiuc.edu";
+
+#### End User Variables	################################################
+
+
+=head1 DESCRIPTION
+
+A simple FAQ posting program that uses PGPMoose and proper Supersedes: and
+Expires: headers, based around Andrew Gierth's News::Article.
+
+=head1 USAGE
+
+faqpost [-hvtq] [-e B<expiretime>] [-r F<rcfile>] [-n NNTPSERVER] F<filename>
+
+=over 4
+
+=item -h  		
+
+Prints a short help message and exits.
+
+=item -v  		
+
+Prints the version number and exits.
+
+=item -t  		
+
+Writes the FAQ to STDOUT rather than posting it.
+
+=item -V		
+
+Verbose mode - prints extra status messages.
+
+=item -n [ NNTPSERVER ] 
+
+Posts the FAQ to the given NNTPSERVER.  If NNTPSERVER has any commas in
+it, it's posted to all of them.
+
+=item -e [ WEEKS : [ DAYS [ : HOURS [ : MINUTES [ : SECONDS ]]]]]
+
+The amount of time before the article expires, formatted as 
+[weeks:days:hours:minutes:seconds].  The latter elements are optional.
+
+=item -r F<rcfile>  	  
+
+Specifies a verimodrc file from which to load PGP keys and the like.  
+
+=item F<filename> 	  
+
+The file containing the FAQ to be posted.  Multiple filenames can be
+specified.
+
+
+=back 
+
+=head1 NOTES
+
+FAQs to be posted must include all of their required headers (Newsgroups,
+Subject, From, Approved, etc); if they don't, you're going to get some errors 
+on posting.  
+
+As this is beta software, I'd recommend backing up your FAQs somewhere.  
+Trust no one.
+
+=cut
+
+# Version History
+# v0.5b - Mon Jun 29 13:20:18 CDT 1998 	
+#   Finished making the thing.  Now we'll distribute it and see what's
+#   broken.  
+# v0.55b - Mon Jun 29 15:45:20 CDT 1998
+#   Put in the PGPMoose support that I should have remembered before
+#   (which actually makes it useful compared to auto-faq).  Made it a bit
+#   closer to the rest of my Verimod software too.  Got ready to put in
+#   some hooks to make it actually based on that software, which will make
+#   maintenance Easy As Hell.
+# v0.56b - Wed Jul 15 21:44:38 CDT 1998
+#   Maintenance changes, nothing major.
+# v0.57b - Fri Jul 17 10:45:42 CDT 1998
+#   Made some POD documentation, generally cleaned up the code a bit.
+#   Probably the biggest change was adding 'use strict', which never hurts.
+# v0.6b - Tue Aug 18 12:46:22 CDT 1998
+#   Added the ability to post to multiple servers.
+
+#### main() ############################################################
+
+use Net::NNTP;
+use Net::NNTP::Auth;
+
+my ($Testing, $Verbose);	# Variables set in Configure
+my (%PGP_PASS, %PGP_KEY);	# PGP keys and passwords
+Configure($Config);	  	# Configure from the verimodrc
+
+$0 =~ s%.*/%%;
+&Usage unless (@ARGV);
+
+while (@ARGV) {
+  my $filename = shift(@ARGV);
+
+  unless (-r $filename) {
+    warn "couldn't open $filename" if $Verbose;
+    next;
+  }
+
+  my $Article = new News::Article;
+  $Article->read($filename);
+
+  # Save the old X-Auth and Approved headers
+  my $old_xauth = $Article->header('x-auth');
+  my $old_approved = $Article->header('approved');
+  
+  # Fix up the article to be a FAQ.
+  $Article->fix_faq($ExpireTime);
+
+  # Sign the article if necessary.
+  my $group;
+  foreach $group ( split(',',$Article->header('newsgroups')) ) {
+    my $pgp_name = $PGP_KEY{$group};
+    my $pgp_key  = $PGP_PASS{$group};
+    if ($pgp_name && $pgp_key) {
+      my $pgp_error = $Article->sign_pgpmoose( $group, $pgp_key, $pgp_name );
+      print $pgp_error if $pgp_error;
+      print "$filename signed for $group\n" if $Verbose && !$pgp_error;
+      
+      $Article->add_headers('Approved', $Approved) 
+		unless $Article->header('approved');
+    }
+  }
+
+  # Post or print the article.
+  if ($Testing) {
+    warn "Posting to servers: @Servers\n" if $Verbose;
+    warn "Article as it would have been posted:\n\n" if $Verbose;
+    $Article->write(\*STDOUT);
+    
+  } else {
+    my $errors;
+    foreach my $server (@Servers) {
+      my $NNTP = Net::NNTP->new($server);
+      $errors .= "Couldn't connect to $server: $!\n" unless $NNTP;
+      next unless $NNTP;
+        
+      my ($nntpuser, $nntppass) = Net::NNTP::Auth->nntpauth( $server);
+      $NNTP->authinfo($nntpuser, $nntppass) if ($nntpuser && $nntppass);
+
+      eval { $Article->post($NNTP) } ;
+      $errors .= "$server: $@\n" if $@;
+      # $ENV{'NNTP_SERVER'} = $_;
+      # eval { $Article->post() };
+      # $errors .= "$_: $@\n" if $@;
+    }
+    if ($errors) { 
+      print ("Article not posted:\n $errors"); 
+      exit $errors;
+    } else {
+      print "$filename posted\n" if $Verbose;
+      $Article->drop_headers('X-Auth', 'Approved');
+      $Article->set_headers('X-Auth', $old_xauth) if $old_xauth;
+      $Article->set_headers('Approved', $old_approved) if $old_approved;
+
+      # Overwrite the old article with this new one.
+      open (FILE, ">$filename") or die "Couldn't output to $filename";
+      $Article->write(\*FILE);
+      close (FILE);
+    }
+  }
+}
+
+exit 0;
+
+### Usage
+# Prints a short helpfile and exits.
+sub Usage {
+  warn <<EOF;
+$0 - posts a FAQ
+$0 reads a FAQ, updates its Message-ID:, Supersedes: and Expires: 
+headers based on the old article, posts the article, and writes the updated
+information back to the filename.  
+
+Usage: 	$0 [hvtV] [-n nntpserver] [-e expiretime] [-r rcfile] filename
+ 	-h		Prints this message and exits.
+	-v		Prints the version number and exits.
+ 	-t		Testing mode - writes the output to STDOUT rather
+			  than posting it.
+	-V		Verbose mode.  Prints extra status messages.
+	-n nntpserver	Where to post the FAQ.  Defaults to $ENV{'NNTP_SERVER'}.
+	-e expiretime	Specifies the amount of time the article should
+			  last for.  Formatted as [weeks:days:hours:
+			  minutes:seconds].
+	-r rcfile	Specifies a verimodrc file to load for PGPMoose keys 
+			  and passwords.  
+	filename 	The FAQ to be posted.  
+
+For further information, read the manual page.
+
+EOF
+ ;
+ exit 0;
+}
+
+### Version
+# Prints the version number and exits.
+sub Version {
+  warn "$0 v$version\n";
+  exit 0;
+}
+
+### Configure
+# Parses the command line options, and the verimodrc file (if present) for 
+# PGPMoose keys and passwords.
+sub Configure {
+  use Getopt::Std;
+  my $RC_File;
+     $RC_File = $Config if (-r $Config);
+
+  # Get command line options
+  getopts('hvtVn:e:r:');
+  &Usage 	       if $opt_h;  # Prints a help file and exits
+  &Version	       if $opt_v;  # Prints the version and exits
+  $Testing  	        = $opt_t;
+  $Verbose 		= $opt_V;
+  $ExpireTime = $opt_e if $opt_e;
+  $RC_File    = $opt_r if $opt_r;
+  
+  @Servers = split(',', $opt_n) if $opt_n;
+
+  my @config = parse_config($RC_File);
+  foreach (@config) {	# Parse the config file
+    if (/^pgp\s+(\S+)\s+(\S+)\s+\"(.*)\"\s*$/i) {
+      $PGP_KEY{$1} = $2;
+      $PGP_PASS{$1} = $3;
+    } else {
+      next;
+    }
+  }
+  return undef;
+}
+
+### parse_config
+# Goes through a configuration file and removes comments, blank lines,
+# leading and/or trailing whitespace, etc.  Also allows for multi-line
+# directives using the standard '\' convention.  Not as powerful as the
+# stuff in the News::Verimod package, but then again for something like
+# this we don't need anything that powerful.
+
+sub parse_config {
+  my $config = shift;
+  my (@lines, $temp);
+  
+  return undef unless $config;
+  
+  open(CONFIG, "<$config") or die "Couldn't open $config";
+  while (<CONFIG>) { 
+    $_ = "$temp $_";
+    chomp;                        # Remove the carriage return
+    next if (/^\s*(\#|$)/);       # Ignore if only whitespace or comments
+    s/[^\\]#.*$//g;               # Remove comments (and allow escaped #'s)
+    s/\\\#/\#/g;                  # Unescape escaped #'s
+    s/\\\\/\\/g;                  #   ...and escaped \'s
+    s/^\s*(.*)\s*$/\1/;           # Kill leading/trailing whitespace 
+  
+    # Allow for multi-line stuff with \'s.
+    if (/\\\s*$/) {
+      s/\s*\\\s*$//g;   # Kill the backslash
+      $temp = $_;
+      next; 
+    } else { 
+      $temp = "";
+      push(@lines, $_);
+    }
+  }
+  return @lines;
+}
+
+#### End main() ########################################################
+
+=head1 REQUIREMENTS
+
+Perl 5, and Andrew Gierth's News::Article (available at a CPAN site near
+you).
+
+=head1 AUTHOR
+
+Written by Tim Skirvin <tskirvin@uiuc.edu>
+
+=head1 COPYRIGHT
+
+Copyright 1998 Tim Skirvin <tskirvin@uiuc.edu>  
+
+This code may be used and/or distributed under the same terms as Perl
+itself.
+
+=cut
+
+#### News::Article stuff ###############################################
+package News::Article;
+
+### fix_faq
+# Sets the Expires, Supersedes, and Message-ID headers based on the old
+# values and the fact that this article should be a FAQ. 
+sub fix_faq {
+  my $self = shift;
+  my ($expiretime) = "@_" 
+		  || $self->header('expire-time')
+		  || $ExpireTime;
+
+  my ($weeks, $days, $hours, $minutes, $seconds) 
+      				= split('\s*:\s*',$expiretime);
+  my $time = $weeks * 604800 + $days * 86400 + $hours * 3600 
+	   + $minutes * 60 + $seconds;
+
+  # Set the new Expires: header
+  my $expiresdate = _format_expires(scalar(gmtime(time + $time)));
+  $self->set_headers('expires', $expiresdate);
+  
+  # Supersede the old message
+  $self->set_headers('supersedes', $self->header('message-id'));
+
+  # Set the new Message-ID based on the old one
+  my $messageid = $self->header('message-id');
+    my ($faqname, $olddate, $domain) = 
+      $messageid =~ /^<(\D+).([^@]*)@(.+)>$/;
+  $self->drop_headers('message-id');
+  $self->add_message_id($faqname,$domain);
+  $self->drop_headers('date');
+  $self->add_date;
+
+  return undef;
+}
+
+### _format_expires
+# Formats the Expires: header correctly, based on an original gmtime-based 
+# value.  Returns the new value.
+sub _format_expires {
+  my $date = shift;
+  $date =~ s/^\s*(\w\w\w)\s+(\w\w\w)\s+(\d+)\s+(\d\d:\d\d:\d\d)\s+(\d+)\s*/$1, $3 $2 $5 $4 GMT/;
+  return $date;
+}
+#### End News::Article stuff ###########################################

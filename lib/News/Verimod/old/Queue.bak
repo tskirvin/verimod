@@ -1,0 +1,90 @@
+package News::Verimod::Queue;
+
+use strict;
+use News::Archive;
+use XML::Twig;
+
+sub new { my $self = {};  bless $self, shift;  $self->_init(@_) }
+
+### _init ( OPTIONS )
+# Actually performs the work of new() and clone().
+sub _init {
+  my ($self, %opts) = @_;
+  my $file = $opts{'file'} || return undef;
+
+
+  
+
+  my $xml = new XML::Twig('keep_spaces' => 1);
+  my $return = $xml->parsefile($file);  return undef unless $return;
+  my $root = $xml->root;
+
+  $$self{'DATA'} = $root;
+
+  $$self{'VOTE'} = {};
+  # article, rawarticle
+  # number, status
+  # score, scoreinfo
+  # %vote
+  # @status
+#  my $article 
+
+  $self;
+}
+
+sub data { shift->{DATA} }
+
+sub messages {}
+sub article {
+  my ($self, %opts) = @_;
+  my $data = $self->data || return undef;
+
+  my $arttext = $data->first_child_text('article') || "";
+  my $article = News::Article->new($arttext);
+
+  $article; 
+}
+sub rawarticle {}
+sub reject {}
+sub approve {}
+sub vote {
+  my ($self, %opts) = @_;
+  my $person = $opts{'person'} or return undef;
+  
+  my $vote      = $opts{'vote'} || "";
+  my $timestamp = $opts{'time'} || time;
+  
+  if ($vote) { $$self{'VOTE'}->{$person} = [ $person, $vote, $timestamp ]; }
+  
+  my $info = $$self{'VOTE'}->{$person} || [ undef, undef, undef ];;
+  wantarray ? @{$info} : $$info[1];
+}
+
+sub lock {}
+sub unlock {}
+
+sub write_xml {
+  my ($self, $fh) = @_;
+  print $fh "<?xml version='1.0'?>\n";
+  print $fh "<article-queue>\n";
+
+  my $votes = $$self{'VOTE'} || {};
+  foreach my $vote ( keys %{$votes} ) { 
+    my ($person, $vote, $time) = @{$$votes{$vote}};
+    print $fh "  <vote name='$person' vote='$vote' time='$time' />\n"
+  }
+  # print $fh 
+  if ($self->article) { 
+    print $fh "  <article>\n";
+    $self->article->write($fh);
+    print $fh "  </article>\n";
+  }
+  if ($self->rawarticle) { 
+    print $fh "  <rawarticle>\n";
+    $self->rawarticle->write($fh);
+    print $fh "  </rawarticle>\n";
+  }
+  print $fh "</article-queue>\n";
+}
+
+1;

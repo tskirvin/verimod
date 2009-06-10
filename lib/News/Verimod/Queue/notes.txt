@@ -1,0 +1,159 @@
+All articles that pass the initial round - that is, weren't immediately
+rejected as spam or whatever - will go into a News::Archive object.  This
+will be used as a base location to start future updates.
+
+Directory Structure
+===================
+
+queue
+ |-- archive
+ |-- reject
+ |-- tocheck
+ \-- topost
+
+Entries in reject/tocheck/topost are XML files containing info for
+searching by queue access programs
+All entries are symlinks (or hardlinks?) to the main archive tree.
+Entries are the original, raw article, with a few headers 
+reject can be 
+
+XML Information
+===============
+
+12345.xml
+
+<xml>
+  <msg number="12345" status="queue" />
+  <overview>[standard overview info]</overview>
+  <score value="1">always</score>
+  <score value="1">linelength text</score>
+  <total_score value="2" />
+  <vote name="person1" value="+1" timestamp="">[reason]</vote>
+  <vote name="person2" value="-1" timestamp="">[reason]</vote>
+  <vote name="person3" value="+1" timestamp="">[reason]</vote>
+  <status type="queue" timestamp="" />
+  <status type="approve" timestamp="" />
+  <article>
+headers
+
+body
+  </article>
+  <rawarticle>
+headers
+
+body
+  </rawarticle>
+</xml>
+
+All read/parsed with News::Article::XML (?).
+
+  package News::Article::XML;
+
+  @ISA = qw( News::Article );
+
+  my $article_xml = News::Article::XML->new();
+  
+  sub new { }
+  sub write_xml {
+    my ( $self, $fh ) = @_;
+    t
+    
+  }
+  sub read_xml {}
+
+queue.cgi
+=========
+
+Looks in queue/tocheck directory for all XML files; lists basic
+information for all of them.  Offers:
+
+  approve (comments)
+  reject (comments + checkboxes for common problems) 
+    incivility, binary, formatting, quoting, crosspost 
+    override noreject?
+  reject-spam
+  view-message
+
+Voting
+======
+
+Entries in the .conf files:
+
+  vote  approve 2       # post when there are two votes to approve
+  vote  reject  1       # reject when there is one vote to reject
+
+First one to be reached is the winner.  Default is 1/1 (so the first
+person to approve wins).
+
+On approval, "X-Approved-By" includes the list of users that voted in
+favor.  On rejection, "X-Rejected-By" includes the list of users that
+voted against.  "X-Moderator-Notes" is added in either case, based on the
+'reason's listed above.
+
+Queue Access Programs
+=====================
+
+NNTP  - post a followup to vote for approve/reject; NNTPAuth is required; 
+        need a special server.  
+Email - 'approve 12345', 'reject 12345', passwords necessary, special
+        address necessary
+Web   - approve/reject based on msg-number as well.  Easiest to add those
+        moderator comments; authorization is based on htpasswd auth.
+RSS   - read-only, but lists current messages in the queue
+
+Locking Issues
+==============
+
+1.  Message goes into ~/incoming directory
+2.  Every xx minutes, ~/incoming is scanned and run through preapproval 
+    script; message is either posted, rejected (rare), or queued (most
+    common).
+    - Queued posts are also mailed to moderators!  (optional but recommended)
+3.  Access to XML files must be locked. 
+4.  XML files are scanned every xx minutes; in between, messages show up 
+    as "ready to be posted" or "ready to be rejected".  
+
+Approval Peusdocode
+===================
+
+foreach msg in queuedir; do
+  my $info = load XML from msg;
+  my (@yesvotes, @novotes);
+  foreach ($info->votes) { 
+    push @yesvotes, $_ if $_->value="+1";
+    push @novotes, $_  if $_->value="-1";
+  }
+
+  if (scalar @yesvotes >= $vote{approve}) { 
+    post message
+    send confirmation message
+    delete from queue
+  } elsif (scalar @novotes >= $vote{reject}) { 
+    send rejection notice
+    delete from queue
+  } else { 
+    # stays in queue
+  }
+done
+
+Old Script
+==========
+
+  #!/bin/sh
+
+  DIR=/home/srs/cache
+  PROG="/home/srs/bin/srs"
+  LOG="/home/srs/srs.log";
+
+  NNTPSERVER=news.killfile.org
+  export NNTPSERVER
+
+  for i in `ls $DIR`; 
+  do
+    echo "`date` - ${PROG} < $DIR/$i" >> $LOG 2>&1
+    RETURN=`${PROG} < $DIR/$i` >> $LOG 2>&1
+    if [ "x$?" = "x0" ]; then
+      echo "removing $DIR/$i" >> $LOG 2>&1
+      rm $DIR/$i >> $LOG 2>&1
+    fi
+  done

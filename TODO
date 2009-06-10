@@ -1,0 +1,26 @@
+Confirmation messages include URL of eventual Google message.
+
+
+
+
+battloid2 => battloid
+package up News::Gateway stuff nicely (or not yet?)
+
+
+score.pl
+queue.pl
+  approve
+  reject
+  view
+  status
+  vote
+  score
+
+queuelist.pl (by type)
+
+CGI versions of all of those
+
+expire.pl (time, outputfile)
+
+  expire (time, outputfile)
+

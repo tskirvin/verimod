@@ -1,0 +1,265 @@
+#!/usr/local/bin/perl -w
+use vars qw( $VERSION %OPTS @RCFILE @MODULES $CLASS $ROOTCLASS $DEBUG
+	     $TESTING $NEWSGROUP $VERIMODRC %CONFIG %DEFAULT %GROUP
+             %PGPMOOSE );
+$VERSION = "1.00";	# Tue 06 Mar 13:34:51 CST 2007
+
+###############################################################################
+### Configuration + Private Data ##############################################
+###############################################################################
+
+## Modify and uncomment this to use user code instead of just system-wide
+## modules.  Note that this path must be set up as a standard Perl tree;
+## I'd personally recommend just installing things system-wide unless you're
+## a developer.
+
+# use lib '/FULL/PATH/TO/PERL';
+use lib '/home/tskirvin/dev/news-archive';
+use lib '/home/tskirvin/dev/news/news-verimod';
+use lib '/home/tskirvin/dev/news/news-gateway';
+use lib '/home/tskirvin/dev/newslib';
+
+## Where should we load our verimodrc files from?  '~' will be replaced
+## with the appropriate home directory, as with most Unix shells.  We may
+## want a more complicated system than this when all is said and done, but
+## this will do for now.
+
+$VERIMODRC = "~/.verimod/verimodrc";
+
+## Should we print debugging information as we go, as defined by the
+## News::Verimod code?  1 for yes, 0 for no.
+
+$DEBUG   = 0;
+
+## By default, are we just testing?
+
+$TESTING = 0;
+
+## Is there a default newsgroup we should try to post to?
+
+$NEWSGROUP = "";
+
+###############################################################################
+### main() ####################################################################
+###############################################################################
+
+use News::Article;
+use News::Verimod;
+use strict;
+use warnings;
+
+$|++;		        # Make sure all messages are printed in order
+delete $ENV{'PATH'};    # Make things happier for taintwatch
+
+### main ( GROUP, QUEUE )
+# Actually does the work of the module.  Most of the rest of this module 
+# can be fairly stable, but 
+sub main {
+  my ($group, $queue) = @_;
+  
+  ## Read the News::Article object from STDIN
+  my $article = $group->read(\*STDIN);
+  return "Not an article" unless $article;
+
+  ## Massage the article, and see if we can post it; if there are errors, 
+  ## we'll handle them shortly.
+  my @errors = $group->fix;
+
+  ## Try to approve the article if we haven't hit any errors so far, leaving
+  ## open the possibility of more errors.
+  unless (scalar @errors) {
+    my $resp = $group->process( 'article' => $article, 'testing' => $TESTING,
+                                                        ( $group->groupopts ) );
+    push @errors, [ 'process', $resp ] if $resp;
+  }
+
+  ## If we have an error, reject the message.
+  if (scalar @errors) {
+    my $rejerr = $group->reject( 'article' => $article, 'testing' => $TESTING,
+                                 'reason'  => [ @errors ],
+                                 ( $group->groupopts ) );
+    return "Error in sending rejection notice: $rejerr\n" if $rejerr;
+  }
+   
+  return 0;
+}
+
+###############################################################################
+### Command-Line Configuration and Initial Setup ##############################
+###############################################################################
+
+use Getopt::Std;
+getopts('hvtc:r:g:d', \%OPTS);
+
+Usage() 	if $OPTS{'h'};          Version()	if $OPTS{'v'};
+$TESTING = 1    if $OPTS{'t'};          $DEBUG   = 1    if $OPTS{'d'};
+
+$VERIMODRC = $OPTS{'r'} if $OPTS{'r'};
+my $verimodrc = News::Verimod->fixpath($VERIMODRC);
+if (-r $verimodrc) { do $verimodrc or die "Couldn't load $verimodrc: $@\n"; } 
+else               { Exit('CONFIG', "Cannot read '$verimodrc'") }
+
+my $newsgroup = $OPTS{'g'} || $NEWSGROUP || "";
+
+if (my $config = $OPTS{'c'} || $CONFIG{$newsgroup} ) {
+  $config = News::Verimod->fixpath($config);
+  if (-r $config) { do $config or die "Couldn't load $config: $@\n"; } 
+  else            { Exit('CONFIG', "Cannot read '$config'") }
+}
+
+## If we don't have anything yet, give up
+Exit('CONFIG', "No/invalid configuration for $newsgroup") unless $CLASS;
+
+## Just a sample to ensure that the group has been configured as well.
+my $maintainer = $GROUP{'MAINTAINER'} || $DEFAULT{'MAINTAINER'};
+Exit('CONFIG', "No maintainer set!") unless $maintainer;
+
+## Create the News::Verimod object
+my $group = new $CLASS ( 'default' => \%DEFAULT, 'group' => \%GROUP )
+                or Exit('CONFIG', "Couldn't create $CLASS object");
+
+$group->set('testing', 1) if $TESTING;
+$group->set('debug', 1)   if $DEBUG;
+
+## Configure the News::Gateway object
+$group->config( [ $CLASS->fixes ],      [ $CLASS->commands ],
+		[ $CLASS->score_list ], [ $CLASS->score_cmds ] )
+	or Exit('CONFIG', "Couldn't configure $CLASS object");
+
+my $return = main( $group );
+Exit('ERROR', $return) if $return;
+exit 0;
+
+###############################################################################
+### Subroutines ###############################################################
+###############################################################################
+
+BEGIN { use vars qw( %ERRORCODES );
+	our %ERRORCODES = 	(
+	'INFO'		=> 	0, 	'CONFIG'	=> 	1,
+	'ERROR'		=>	1, 	'PROCESSED'	=>	0,
+	'UNPROCESSED'	=> 	1,
+				); }
+
+### Usage
+# Prints out a short help file and exits.
+sub Usage {
+  $0 =~ s%.*/%%g;         # Lose the annoying path information
+  my @exit = <<EOM;
+$0 v$VERSION
+A simple moderation program
+Usage: $0 [-hvptd] [-r rcfile] [-c configfile] [-g newsgroup]
+
+$0 takes a message from STDIN, processes it for posting, and decides
+how to deal with it, based on a set of News::Verimod configuration files.
+For more details, read the manual pages for News::Verimod.
+
+	-h		Prints this message and exits.
+	-v		Prints the version number and exits.
+	-t		'Testing' mode - just print what we would have done.
+        -d              'Debug' mode - print extra status messages
+	-g news.group	Use B<newsgroup> rather than the default
+	-r verimodrc	Use F<verimodrc> rather than the default
+	-c configfile	Use F<configfile> rather than the default
+EOM
+
+  Exit('INFO', @exit);
+}
+
+### Version
+# Prints out the version and exits.
+sub Version { Exit('INFO', "$0 v$VERSION"); }
+
+### Exit
+# Exits the program with the proper error message
+
+sub Exit {
+  my ($code, @reason) = @_;  $code ||= "";
+  if (@reason) {
+    my $reason = join('', @reason, "\n"); $reason =~ s/\n+$/\n/; warn $reason;
+  }
+  exit $ERRORCODES{'ERROR'} || 0;
+}
+
+###############################################################################
+### Documentation #############################################################
+###############################################################################
+
+=head1 NAME
+
+battloid - a simple News::Verimod moderation 'bot, invoked by procmail
+
+=head1 SYNOPSIS
+
+battloid [-hvtd] [-c configfile] [-r rcfile] [-g newsgroup] article
+
+=head1 DESCRIPTION
+
+battloid is a simple moderation program that takes a message from STDIN,
+parses it, and either posts it or does something else as appropriate.  It
+is a part of the News::Verimod package.
+
+	-h		Prints a short help message and exits.
+	-v		Prints the version number and exits.
+	-t		'Testing' mode - just print what we would have done.
+        -d              'Debug' mode - print extra status messages
+	-g news.group	Use B<newsgroup> rather than the default
+	-r verimodrc	Use F<verimodrc> rather than the default
+	-c configfile	Use F<configfile> rather than the default
+
+Returns 0 on success, and 1 on failure.
+
+=head1 REQUIREMENTS
+
+News::Article and News::Verimod.
+
+=head1 SEE ALSO
+
+B<News::Verimod>
+
+=head1 AUTHOR
+
+Tim Skirvin <tskirvin@killfile.org>, with thanks to Andrew Gierth
+<andrew@erlenstar.demon.co.uk> and Russ Allbery <rra@stanford.edu>
+
+=head1 HOMEPAGE
+
+B<http://www.killfile.org/~tskirvin/software/verimod/>
+
+=head1 LICENSE
+
+This code may be used and/or distributed under the same terms as Perl
+itself.
+
+=head1 COPYRIGHT
+
+Copyright 1996-2007, Tim Skirvin <tskirvin@killfile.org>.  All rights
+reserved.
+
+=cut
+
+###############################################################################
+### Version History ###########################################################
+###############################################################################
+# 1.00          Fri 09 Mar 13:06:57 CST 2007    tskirvin
+### Code is formatted in a reasonable way; main() is separated out, for ease
+### of finding and copying this into other code.  Ready for distribution.
+
+# 0.99          Tue 06 Mar 13:40:37 CST 2007    tskirvin
+### Getting ready to call it final, or at least 1.00.  Yay!  Added 'debug'.
+# 0.51          Tue 06 Mar 12:54:47 CST 2007    tskirvin
+### Some small fixes for errors and documentation; no functional changes.
+# 0.50		Thu Feb 17 09:15:32 CST 2005
+### Rewriting this thing now that I actually write code for a living and
+### have some idea of what I'm doing.
+# 0.2b 		Mon Aug  3 12:54:45 CDT 1998
+### Added in the -t and -a options.
+# 0.11b 	Fri Jul 17 11:24:43 CDT 1998
+### Fixed up the documentation and put it in a real place.  Distribution
+### is imminent, well, as soon as the News::Verimod stuff is all done.
+### Took it out of alpha, since it definitely works (a night of testing
+### shows you that).
+# 0.1a		Thu Jul 16 13:47:46 CDT 1998
+### The first thing resembling an actually working and commented piece
+### of code.  We'll see how well it works.
+

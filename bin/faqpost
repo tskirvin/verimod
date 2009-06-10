@@ -1,0 +1,297 @@
+#!/usr/local/bin/perl
+# -*- Perl -*- Tue 13 Jun 16:40:18 CDT 2006
+#############################################################################
+# Written by Tim Skirvin <tskirvin@killfile.org>.
+# Copyright 1998-2006 Tim Skirvin.  Redistribution terms are below.
+#############################################################################
+use vars qw( $VERSION );  $VERSION = "0.90";
+
+###############################################################################
+### Default Configuration #####################################################
+###############################################################################
+use vars qw( $PGPMOOSERC $TEST $DEBUG $APPROVED $EXPIRE @SERVERS );
+
+## Where are the keys and password kept for each group?  This file is a 
+## standard News::verimod::PGPMoose configuration file.
+$PGPMOOSERC = "$ENV{'HOME'}/.verimod/pgpmooserc";
+
+## Are we testing, or actually printing things?  1 is for testing, 0 for no.
+$TEST = 0;
+
+## Print extra debugging information?  1 for yes, 0 for now.
+$DEBUG = 0;
+
+### The following should all be put into a local configuration file later, 
+### but for now it's fine in the config file itself.
+
+## The contents of the 'Approved' header, if one has to be added.
+$APPROVED = 'tskirvin@killfile.org';
+
+## The amount of time before to increment the 'Expires' header.  Expressed as
+## weeks:days:hours:minutes:seconds
+$EXPIRE = "6:0:0:0";
+
+## Where to post the FAQ?  Contains a list of server names.  Note - we're not 
+## yet doing authentication with them, though we could do so with little effort.
+@SERVERS = qw( news.killfile.org news.ks.uiuc.edu );
+
+###############################################################################
+### main() ####################################################################
+###############################################################################
+
+use News::Article;
+use strict;
+use Net::NNTP;
+use Getopt::Std;
+use lib '/home/tskirvin/dev/news-verimod';
+use News::Verimod::PGPMoose;
+
+my %opts;  getopts('hvtVn:e:r:', \%opts);
+
+$TEST           ||= $opts{'t'};
+$DEBUG          ||= $opts{'V'};
+$EXPIRE           = $opts{'e'} if $opts{'e'};
+$PGPMOOSERC       = $opts{'r'} if $opts{'r'};
+@SERVERS          = split(',', $opts{'n'}) if $opts{'n'};
+
+Usage()   if $opts{'h'};    # Prints a help file and exits
+Version() if $opts{'v'};    # Prints the version and exits
+Usage()   unless (@ARGV);   # Must have some FAQs on command-line
+
+our $PGPHASH = News::Verimod::PGPMoose->parse_pgpmooserc( $PGPMOOSERC );
+
+while (@ARGV) {
+  my $filename = shift(@ARGV);
+
+  unless (-r $filename) { warn "couldn't open $filename" if $DEBUG; next; }
+
+  my $article = News::Article->new($filename) || next;
+
+  # Save the old X-Auth and APPROVED headers
+  my $old_xauth = $article->header('x-auth');
+  my $old_approved = $article->header('approved');
+  
+  # Fix up the article to be a FAQ.
+  $article->fix_faq($EXPIRE);
+
+  # Sign the article if necessary.
+  foreach my $group ( split(',',$article->header('newsgroups')) ) {
+    my $info = $$PGPHASH{$group};  next unless $info && ref $info;
+    if ( my ($phrase, $id) = @{$info} ) {
+      my $pgp_error = $article->sign_pgpmoose( $group, $phrase, $id );
+      print $pgp_error if $pgp_error;
+      warn "$filename signed for $group\n" if $DEBUG && !$pgp_error;
+      
+      $article->add_headers('approved', $APPROVED) 
+		unless $article->header('approved');
+    }
+  }
+
+  # Post or print the article.
+  if ($TEST) {
+    warn "Posting to servers: ", join(', ', @SERVERS), "\n" if $DEBUG;
+    warn "Article as it would have been posted:\n\n" if $DEBUG;
+    $article->write(\*STDOUT);
+    
+  } else {
+    my $errors;
+    foreach my $server (@SERVERS) {
+      my $NNTP = Net::NNTP->new($server);
+      $errors .= "Couldn't connect to $server: $!\n" unless $NNTP;
+      next unless $NNTP;
+      eval { $article->post($NNTP) } ;
+      $errors .= "$server: $@\n" if $@;
+    }
+    if ($errors) { print ("Article not posted:\n $errors"); exit $errors; } 
+    else {
+      print "$filename posted\n" if $DEBUG;
+      $article->drop_headers('X-Auth', 'approved');
+      $article->set_headers('X-Auth', $old_xauth) if $old_xauth;
+      $article->set_headers('approved', $old_approved) if $old_approved;
+
+      # Overwrite the old article with this new one.
+      open (FILE, ">$filename") or die "Couldn't output to $filename";
+      $article->write(\*FILE);
+      close (FILE);
+    }
+  }
+}
+
+exit 0;
+
+###############################################################################
+### Subroutines ###############################################################
+###############################################################################
+
+### Usage() - prints the documentation and exits.
+sub Usage { exec( 'perldoc', '-r', $0 ); }
+
+### Version() - prints the version number and exits.
+sub Version { my $prog = $0; $prog =~ s%.*/%%;  "$prog v$VERSION\n" }
+
+###############################################################################
+### News::Article functions ###################################################
+###############################################################################
+
+# probably ought to split these off too
+package News::Article;
+
+### fix_faq
+# Sets the Expires, Supersedes, and Message-ID headers based on the old
+# values and the fact that this article should be a FAQ. 
+sub fix_faq {
+  my $self = shift;
+  my ($expiretime) = "@_" || $self->header('expire-time') || "6:0:0:0:0";
+
+  my ($weeks, $days, $hours, $minutes, $seconds) 
+      				= split('\s*:\s*',$expiretime);
+  my $time = $weeks * 7 * 86400 + $days * 86400 + $hours * 3600 
+	   + $minutes * 60 + $seconds;
+
+  # Set the new Expires: header
+  my $expiresdate = _format_expires(scalar(gmtime(time + $time)));
+  $self->set_headers('expires', $expiresdate);
+  
+  # Supersede the old message
+  $self->set_headers('supersedes', $self->header('message-id'));
+
+  # Set the new Message-ID based on the old one
+  my $messageid = $self->header('message-id');
+    my ($faqname, $olddate, $domain) = 
+      $messageid =~ /^<(\D+).([^@]*)@(.+)>$/;
+  $self->drop_headers('message-id');
+  $self->add_message_id($faqname,$domain);
+  $self->drop_headers('date');
+  $self->add_date;
+
+  return undef;
+}
+
+### _format_expires
+# Formats the Expires: header correctly, based on an original gmtime-based 
+# value.  Returns the new value.
+sub _format_expires {
+  my $date = shift;
+  $date =~ s/^\s*(\w\w\w)\s+(\w\w\w)\s+(\d+)\s+(\d\d:\d\d:\d\d)\s+(\d+)\s*/$1, $3 $2 $5 $4 GMT/;
+  return $date;
+}
+
+###############################################################################
+### Documentation #############################################################
+###############################################################################
+
+=head1 NAME
+
+faqpost - a simple FAQ posting program.
+
+=head1 SYNOPSIS
+
+  faqpost [-hvtq] [-e B<expiretime>] [-r F<rcfile>] [-n NNTPSERVER] F<filename>
+
+=head1 DESCRIPTION
+
+A simple FAQ posting program, based on News::Article.  Takes a
+fully-formatted FAQ (with Newsgroups, Subject, From, Approved, Expires,
+etc) and updates it with a new Message-ID, Supersedes, and Expires
+header; this is then posted, and the updated version is saved in place.
+Additional posting headers (X-Auth based on PGPMoose, Approved) are posted
+but not saved.
+
+=head1 USAGE
+
+The following command-line options are supported.
+
+=over 8
+
+=item -h  		
+
+Prints this documentation and exits.  Also printed when no FAQs are listed 
+on the command-line.
+
+=item -v  		
+
+Prints the version number and exits.
+
+=item -t  		
+
+Test mode - writes the FAQ to STDOUT rather than posting it.
+
+=item -V		
+
+Verbose/debug mode - prints extra status messages.
+
+=item -n [ NNTPSERVER ] 
+
+Posts the FAQ to the given NNTPSERVER.  If NNTPSERVER has any commas in
+it, the FAQ is posted to all of them. 
+
+=item -e [ WEEKS : [ DAYS [ : HOURS [ : MINUTES [ : SECONDS ]]]]]
+
+The amount of time before the article expires, formatted as 
+[weeks:days:hours:minutes:seconds].  The latter elements are optional.
+
+=item -r F<rcfile>  	  
+
+Specifies a pgpmooserc file from which to load PGP keys.  This is parsed
+with parse_pgpmooserc() from News::Verimod::PGPMoose.
+
+=item F<filename> 	  
+
+The file containing the FAQ to be posted.  Multiple filenames can be
+specified.
+
+=back 
+
+=head1 NOTES
+
+This pretty much works.  There's a few places where it should be
+standardized, mostly so that some configuration can happen on a per-user
+basis instead of the script itself, but this is a good start.
+
+=head1 REQUIREMENTS
+
+Net::NNTP, News:Article, News::Verimod::PGPMoose
+
+=head1 SEE ALSO
+
+B<Net::NNTP>, B<News::Article>, B<News::Verimod::PGPMoose>
+
+=head1 AUTHOR
+
+Tim Skirvin <tskirvin@killfile.org>
+
+=head1 LICENSE
+
+This code may be redistributed under the same terms as Perl itself.
+
+The author holds no responsibility for how this program is used, save
+to note that it can probably be misused rather easily; please don't
+do so, though.
+
+=head1 COPYRIGHT
+
+Copyright 1999-2006, Tim Skirvin <tskirvin@killfile.org>.
+
+=cut
+
+###############################################################################
+### Version History ###########################################################
+###############################################################################
+# 0.90          Wed 01 Nov 14:07:05 CST 2006    tskirvin
+### A real release?  Me?  Now uses News::Verimod::PGPMoose; documented well.
+# 0.6b          Tue Aug 18 12:46:22 CDT 1998    tskirvin
+### Added the ability to post to multiple servers.
+# 0.57b         Fri Jul 17 10:45:42 CDT 1998
+### Made some POD documentation, generally cleaned up the code a bit.
+### Probably the biggest change was adding 'use strict', which never hurts.
+# v0.56b        Wed Jul 15 21:44:38 CDT 1998    tskirvin
+### Maintenance changes, nothing major.
+# 0.55b         Mon Jun 29 15:45:20 CDT 1998    tskirvin
+### Put in the PGPMoose support that I should have remembered before
+### (which actually makes it useful compared to auto-faq).  Made it a bit
+### closer to the rest of my Verimod software too.  Got ready to put in
+### some hooks to make it actually based on that software, which will make
+### maintenance Easy As Hell.
+# 0.5b          Mon Jun 29 13:20:18 CDT 1998 	tskirvin
+### Finished making the thing.  Now we'll distribute it and see what's
+### broken.  

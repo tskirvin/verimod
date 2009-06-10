@@ -1,0 +1,289 @@
+#!/usr/local/bin/perl -Tw
+use vars qw( $VERSION %OPTS @RCFILE @MODULES $CLASS $ROOTCLASS $DEBUG
+	     $TESTING $NEWSGROUP $VERIMODRC %CONFIG %DEFAULT %GROUP
+             %PGPMOOSE );
+$VERSION = "0.10";	# Tue 06 Mar 13:34:51 CST 2007
+
+###############################################################################
+### Configuration + Private Data ##############################################
+###############################################################################
+
+## Modify and uncomment this to use user code instead of just system-wide
+## modules.  Note that this path must be set up as a standard Perl tree;
+## I'd personally recommend just installing things system-wide unless you're
+## a developer.
+
+# use lib '/FULL/PATH/TO/PERL';
+use lib '/home/tskirvin/dev/news-archive';
+use lib '/home/tskirvin/dev/news/news-verimod';
+use lib '/home/tskirvin/dev/news/news-gateway';
+
+## Where should we load our verimodrc files from?  '~' will be replaced
+## with the appropriate home directory, as with most Unix shells.  We may
+## want a more complicated system than this when all is said and done, but
+## this will do for now.
+
+$VERIMODRC = "~/.verimod/verimodrc";
+
+## Should we print debugging information as we go, as defined by the
+## News::Verimod code?  1 for yes, 0 for no.
+
+$DEBUG   = 1;
+
+## By default, are we just testing?
+
+$TESTING = 0;
+
+## Is there a default newsgroup we should try to post to?
+
+$NEWSGROUP = "";
+
+###############################################################################
+### main() ####################################################################
+###############################################################################
+
+use News::Article;
+use News::Verimod;
+use News::Verimod::ModNotes;
+use strict;
+use warnings;
+
+$|++;		        # Make sure all messages are printed in order
+delete $ENV{'PATH'};    # Make things happier for taintwatch
+
+### main ( GROUP, QUEUE )
+# Actually does the work of the module.  Most of the rest of this module 
+# can be fairly stable, but 
+sub main {
+  my ($group, $queue) = @_;
+
+  my $action = $OPTS{'a'} || 'listqueue';
+  my $msgid = shift @ARGV || "";
+
+  $msgid = join('', '<', $msgid, '>');
+  $msgid =~ s/^<</</g;  $msgid =~ s/>>$/>/g;
+
+  if (lc $action eq 'view') {
+    Usage() unless $msgid;   
+    my $article = $queue->get_article('id' => $msgid) 
+                        or Exit('ERROR', "Couldn't get article from queue");
+    Exit('ERROR', $article ) unless ref $article;       # got some text
+    $article->write(\*STDOUT);
+
+  ## Approve the message in the queue - this works!
+  } elsif (lc $action eq 'approve') { 
+    Usage() unless $msgid;
+    my $resp = $queue->approve_from_queue( 'id' => $msgid, 'verimod' => $group, 
+                                 'testing' => $TESTING, ( $group->groupopts ) );
+    return $resp;
+
+  ## Approve the message in the queue - this works!
+  } elsif (lc $action eq 'approvequiet') { 
+    Usage() unless $msgid;
+    my $resp = $queue->approve_from_queue( 'id' => $msgid, 'verimod' => $group, 
+           'testing' => $TESTING, 'nouserconfirm' => 1, ( $group->groupopts ) );
+    return $resp;
+
+
+  } elsif (lc $action eq 'reject') {   
+    Usage() unless $msgid;
+    my @reject_reasons = <STDIN>;
+    my @reasons = News::Verimod::ModNotes->parse_modnotes(@reject_reasons);
+    my $resp = $queue->reject_from_queue( 'id' => $msgid, 'verimod' => $group, 
+                   'testing' => $TESTING, 'reason' =>  [ @reasons ], 
+                                                        ( $group->groupopts ) );
+    return $resp;
+
+  } elsif (lc $action eq 'rejectquiet') {  
+    Usage() unless $msgid;
+    my @reject_reasons = <STDIN>;
+    my @reasons = News::Verimod::ModNotes->parse_modnotes(@reject_reasons);
+    my $resp = $queue->reject_from_queue( 'id' => $msgid, 'verimod' => $group, 
+                   'testing' => $TESTING, 'reason' =>  [ @reasons ], 
+                                    'nomodreject' => 1, ( $group->groupopts ) );
+    return $resp;
+
+  } elsif (lc $action eq 'list') {
+    return scalar $queue->listqueue_prettytext;
+
+    # return scalar $queue->listqueue_html_table;
+  } elsif (lc $action eq 'listqueue') {
+    return "Not yet implemented";
+  } elsif (lc $action eq 'score') { 
+    Usage() unless $msgid;
+
+  } else { Usage() }
+
+  0;
+}
+
+
+###############################################################################
+### Command-Line Configuration and Initial Setup ##############################
+###############################################################################
+
+use Getopt::Std;
+getopts('hvtc:r:g:da:', \%OPTS);
+
+Usage() 	if $OPTS{'h'};          Version()	if $OPTS{'v'};
+$TESTING = 1    if $OPTS{'t'};          $DEBUG   = 1    if $OPTS{'d'};
+
+$VERIMODRC = $OPTS{'r'} if $OPTS{'r'};
+my $verimodrc = News::Verimod->fixpath($VERIMODRC);
+if (-r $verimodrc) { do $verimodrc or die "Couldn't load $verimodrc: $@\n"; } 
+else               { Exit('CONFIG', "Cannot read '$verimodrc'") }
+
+my $newsgroup = $OPTS{'g'} || $NEWSGROUP || "";
+Exit('Config', "No newsgroup chosen (-g GROUP)") unless $newsgroup;
+
+if (my $config = $OPTS{'c'} || $CONFIG{$newsgroup} ) {
+  $config = News::Verimod->fixpath($config);
+  if (-r $config) { do $config or die "Couldn't load $config: $@\n"; } 
+  else            { Exit('CONFIG', "Cannot read '$config'") }
+}
+
+## If we don't have anything yet, give up
+Exit('CONFIG', "No/invalid configuration for $newsgroup") unless $CLASS;
+
+## Create the News::Verimod::Queue object
+my $queuedir = $CLASS->groupinfo->{'QUEUEDIR'} || "";
+   $queuedir = News::Verimod->fixpath($queuedir);
+die "No queue directory set for $CLASS\n" unless $queuedir;
+
+my $queue = new News::Verimod::Queue('dir' => $queuedir, 'readonly' => 1)
+        || die "Couldn't make queue from $queuedir: $!\n";
+
+## Create the News::Verimod object                                              
+my $group = new $CLASS ( 'default' => \%DEFAULT, 'group' => \%GROUP )
+                or Exit('CONFIG', "Couldn't create $CLASS object");
+$group->set('testing', $TESTING);       $group->set('debug', $DEBUG);
+  
+## Configure the News::Gateway object
+$group->config( [ $CLASS->fixes ],      [ $CLASS->commands ],
+                [ $CLASS->score_list ], [ $CLASS->score_cmds ] )
+        or Exit('CONFIG', "Couldn't configure $CLASS object");
+
+## Just a sample to ensure that the group has been configured as well.
+my @missing = $group->configured;
+Exit('CONFIG', "Not configured: missing " . join(", ", @missing)) if @missing;
+
+my $return = main( $group, $queue );
+Exit('ERROR', $return) if $return;
+Exit('PROCESSED');
+
+###############################################################################
+### Subroutines ###############################################################
+###############################################################################
+
+BEGIN { use vars qw( %ERRORCODES );
+	our %ERRORCODES = 	(
+	'INFO'		=> 	0, 	'CONFIG'	=> 	1,
+	'ERROR'		=>	1, 	'PROCESSED'	=>	0,
+	'UNPROCESSED'	=> 	1,
+				); }
+
+### Usage
+# Prints out a short help file and exits.
+sub Usage {
+  $0 =~ s%.*/%%g;         # Lose the annoying path information
+  my @exit = <<EOM;
+$0 v$VERSION
+A simple moderation program
+Usage: $0 [-hvptd] [-r rcfile] [-c configfile] [-g newsgroup]
+
+$0 takes a message from STDIN, processes it for posting, and decides
+how to deal with it, based on a set of News::Verimod configuration files.
+For more details, read the manual pages for News::Verimod.
+
+	-h		Prints this message and exits.
+	-v		Prints the version number and exits.
+	-t		'Testing' mode - just print what we would have done.
+        -d              'Debug' mode - print extra status messages
+	-g news.group	Use B<newsgroup> rather than the default
+	-r verimodrc	Use F<verimodrc> rather than the default
+	-c configfile	Use F<configfile> rather than the default
+EOM
+
+  Exit('INFO', @exit);
+}
+
+### Version
+# Prints out the version and exits.
+sub Version { Exit('INFO', "$0 v$VERSION"); }
+
+### Exit
+# Exits the program with the proper error message
+sub Exit {
+  my ($code, @reason) = @_;  $code ||= "";
+  if (@reason) {
+    my $reason = join('', @reason, "\n"); $reason =~ s/\n+$/\n/; warn $reason;
+  }
+  exit $ERRORCODES{'ERROR'} || 0;
+}
+
+###############################################################################
+### Documentation #############################################################
+###############################################################################
+
+=head1 NAME
+
+veriqueue - News::Verimod queue manipulation script
+
+=head1 SYNOPSIS
+
+veriqueue [-hvtd] [-c configfile] [-r rcfile] [-g newsgroup] msgid
+
+=head1 DESCRIPTION
+
+veriscript is used to manipulate an existing News::Verimod queue to 
+approve or reject posts, list the messages in the queue, and so forth.
+It is a part of the News::Verimod package.
+
+	-h		Prints a short help message and exits.
+	-v		Prints the version number and exits.
+	-t		'Testing' mode - just print what we would have done.
+        -d              'Debug' mode - print extra status messages
+	-g news.group	Use B<newsgroup> rather than the default
+	-r verimodrc	Use F<verimodrc> rather than the default
+	-c configfile	Use F<configfile> rather than the default
+
+        -a type         The type of action that we want to take on the queue.
+                        Possible actions: [list later]
+                        approve, reject, rejectquiet, list, view, 
+
+Returns 0 on success, and 1 on failure.
+
+=head1 REQUIREMENTS
+
+News::Verimod and its associated packages.
+
+=head1 SEE ALSO
+
+B<News::Verimod>
+
+=head1 AUTHOR
+
+Tim Skirvin <tskirvin@killfile.org>
+
+=head1 HOMEPAGE
+
+B<http://www.killfile.org/~tskirvin/software/verimod/>
+
+=head1 LICENSE
+
+This code may be used and/or distributed under the same terms as Perl
+itself.
+
+=head1 COPYRIGHT
+
+Copyright 1996-2007, Tim Skirvin <tskirvin@killfile.org>.  All rights
+reserved.
+
+=cut
+
+###############################################################################
+### Version History ###########################################################
+###############################################################################
+# 0.10          Fri 09 Mar 13:33:17 CST 2007    tskirvin
+### Need to find a nice way to print these things first.  Based off of the 
+### old battloid code.

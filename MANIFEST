@@ -1,0 +1,25 @@
+ChangeLog
+INSTALL
+Makefile.PL
+MANIFEST
+META.yml                                 Module meta-data (added by MakeMaker)
+News/Verimod/Boiler/Approve.pm
+News/Verimod/Boiler/Enqueue.pm
+News/Verimod/BoilerMIME/Logger.pm
+News/Verimod/BoilerMIME.pm
+News/Verimod/Boiler/Reject.pm
+News/Verimod/Mbox.pm
+News/Verimod/ModNotes.pm
+News/Verimod/PGPMoose.pm
+News/Verimod.pm
+News/Verimod/Queue/HTML.pm
+News/Verimod/Queue.pm
+News/Verimod/Sample.pm
+README
+scripts/battloid
+scripts/expire-veriqueue
+scripts/veriqueue
+scripts/veriqueue.cgi
+scripts/veriscore
+TODO
+Version.pm
